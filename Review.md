@@ -243,7 +243,6 @@ The vaultCreated event finally emits the msg.sender, the backupAddress, the star
 
 Finally the Vault ID is incremented by one
 
-
 ## LibKeep.sol
 
 ##### Line 3 - 13
@@ -428,8 +427,7 @@ This function returns the vault id of a particular vault
     }
 ```
 
-This function reset the balances of ETH, ERC721,ERC1155, and ERC20 tokens of an inheritor to zero
-after they have claimed.
+This function reset the balances of ETH, ERC721,ERC1155, and ERC20 tokens of an inheritor to zero after they have claimed.
 
 ##### Line 117 - 156
 
@@ -541,3 +539,524 @@ This Function Adds inheritors to a vault, with their corresponding Wei balance. 
         emit EthAllocated(_inheritors, _ethShares, _vaultID());
     }
 ```
+
+This function allocates ether to inheritors, it first ensures that the array of inheritors is not empty and also that the inheritors array length is same as the length of the array holding their shares in ether. it reverts with the appropriate error message if otherwise. it further chaecks the storage to ensure that the passed in inheritors are indeed active inheritors and also that the cummulative ether allocated is not greater than the ether available in the contract. it updates the last ping to the current block.timestamp then emit the details of the allocated Eth
+
+##### Line 218 - 253
+
+```
+   function _allocateERC20Tokens(address token, address[] calldata _inheritors, uint256[] calldata _shares) internal {
+        if (_inheritors.length == 0 || _shares.length == 0) {
+            revert EmptyArray();
+        }
+        if (_inheritors.length != _shares.length) {
+            revert LengthMismatch();
+        }
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        for (uint256 k; k < _inheritors.length; k++) {
+            if (!Guards._anInheritor(_inheritors[k])) {
+                revert NotInheritor();
+            }
+            if (!Guards._activeInheritor(_inheritors[k])) {
+                revert InactiveInheritor();
+            }
+            vaultData.inheritorTokenShares[_inheritors[k]][token] = _shares[k];
+            if (!vaultData.inheritorActiveTokens[_inheritors[k]][token] && _shares[k] > 0) {
+                vaultData.inheritorAllocatedERC20Tokens[_inheritors[k]].push(token);
+                vaultData.inheritorActiveTokens[_inheritors[k]][token] = true;
+            }
+            //if allocation is being reduced to zero
+            if (_shares[k] == 0) {
+                LibKeepHelpers.removeAddress(vaultData.inheritorAllocatedERC20Tokens[_inheritors[k]], token);
+                //double-checking
+                vaultData.inheritorActiveTokens[_inheritors[k]][token] = false;
+            }
+            //finally check that limit isn't exceeded
+            //get vault token balance
+            uint256 currentBalance = IERC20(token).balanceOf(address(this));
+            if (getCurrentAllocatedTokens(token) > currentBalance) {
+                revert TokenAllocationOverflow(token, getCurrentAllocatedTokens(token) - currentBalance);
+            }
+        }
+        _ping();
+        emit ERC20TokensAllocated(token, _inheritors, _shares, _vaultID());
+    }
+```
+
+This function allocates ERC20 Tokens to inheritors, it first ensures that the array of inheritors is not empty and also that the inheritors array length is same as the length of the array holding their shares in ether. it reverts with the appropriate error message if otherwise.
+
+it goes further to check if the passed in inheritor is registered and active, checks if the passed in token is part of the inheritors active token and the token share is greater than zero. it this checks are true, pushed this token to the inheritors allocated ERC20 Tokens and set it as an active token.
+
+If the token shares for an inheritor is been reduced to zero, remove that token from the allocated inheritor ERC20 Tokens and set the inheritorActiveTokens for that particular token to false.
+finally check and ensure that the cummulative allocated Tokens is greater than the contract balance of that token, update the last ping variable in storage and emit the informations from this function
+
+##### Line 255 - 327
+
+```
+    function _allocateERC721Tokens(address _token, address[] calldata _inheritors, uint256[] calldata _tokenIDs)
+        internal
+    {
+        if (_inheritors.length == 0 || _tokenIDs.length == 0) {
+            revert EmptyArray();
+        }
+        if (_inheritors.length != _tokenIDs.length) {
+            revert LengthMismatch();
+        }
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        for (uint256 k; k < _inheritors.length; k++) {
+            if (!Guards._anInheritorOrZero(_inheritors[k])) {
+                revert NotInheritor();
+            }
+            if (!Guards._activeInheritor(_inheritors[k])) {
+                revert InactiveInheritor();
+            }
+            //short-circuit
+            if (vaultData.ERC721ToInheritor[_token][_tokenIDs[k]] == _inheritors[k]) {
+                continue;
+            }
+            //confirm ownership
+            try IERC721(_token).ownerOf(_tokenIDs[k]) returns (address owner) {
+                if (owner == address(this)) {
+                    if (vaultData.allocatedERC721Tokens[_token][_tokenIDs[k]]) {
+                        address current = vaultData.ERC721ToInheritor[_token][_tokenIDs[k]];
+                        //if it is being allocated to someone else
+                        if (current != _inheritors[k] && current != address(0) && _inheritors[k] != address(0)) {
+                            //Might add an Unallocation event
+                            vaultData.whitelist[_token][current] = false;
+                            LibKeepHelpers.removeUint(vaultData.inheritorAllocatedTokenIds[current][_token], _tokenIDs[k]);
+                            //if no tokens remain for that address
+                            if (vaultData.inheritorAllocatedTokenIds[current][_token].length == 0) {
+                                //remove the address
+                                LibKeepHelpers.removeAddress(vaultData.inheritorAllocatedERC721TokenAddresses[current], _token);
+                            }
+                        }
+                        //if it is being unallocated
+                        if (_inheritors[k] == address(0)) {
+                            vaultData.allocatedERC721Tokens[_token][_tokenIDs[k]] = false;
+                            LibKeepHelpers.removeUint(vaultData.inheritorAllocatedTokenIds[current][_token], _tokenIDs[k]);
+
+                            if (vaultData.inheritorAllocatedTokenIds[_inheritors[k]][_token].length == 0) {
+                                LibKeepHelpers.removeAddress(vaultData.inheritorAllocatedERC721TokenAddresses[current], _token);
+                            }
+                        }
+                    } else {
+                        vaultData.allocatedERC721Tokens[_token][_tokenIDs[k]] = true;
+                    }
+                    vaultData.ERC721ToInheritor[_token][_tokenIDs[k]] = _inheritors[k];
+                    if (vaultData.inheritorAllocatedTokenIds[_inheritors[k]][_token].length == 0) {
+                        vaultData.inheritorAllocatedERC721TokenAddresses[_inheritors[k]].push(_token);
+                    }
+
+                    vaultData.inheritorAllocatedTokenIds[_inheritors[k]][_token].push(_tokenIDs[k]);
+
+                    if (_tokenIDs[k] == 0) {
+                        vaultData.whitelist[_token][_inheritors[k]] = true;
+                    }
+                    //   vaultData.inheritorERC721Tokens[_inheritors[k]][_token] = _tokenIDs[k];
+                    emit ERC721TokensAllocated(_token, _inheritors[k], _tokenIDs[k], _vaultID());
+                }
+                if (owner != address(this)) {
+                    emit ERC721ErrorHandled(_tokenIDs[k], "Not_Owner");
+                    continue;
+                }
+            } catch Error(string memory r) {
+                emit ERC721ErrorHandled(_tokenIDs[k], r);
+                continue;
+            }
+        }
+        _ping();
+    }
+```
+
+This Function sets token allocations for a particular ERC721 for a list of inheritors. it ensures the array of inheritors and array of shears provided have the same length and they are not empty arrays, it is guarded with \_aninheritorOrZero() which returns true
+for a true inheritor or a zero address and \_activeInheritor() which returns true for an active
+inheritor and false otherwise,
+
+if the caller of this function is not the contract address the process is
+reversed with ERC721ErrorHandled() error. It calls the_ping() function after this operation to update the lastPing in storage. It also emits an event ERC721TokensAllocated()
+
+##### Line 329 - 382
+
+```
+    function _allocateERC1155Tokens(
+        address _token,
+        address[] calldata _inheritors,
+        uint256[] calldata _tokenIDs,
+        uint256[] calldata _amounts
+    )
+        internal
+    {
+        if (_inheritors.length == 0 || _tokenIDs.length == 0) {
+            revert EmptyArray();
+        }
+        if (_inheritors.length != _tokenIDs.length) {
+            revert LengthMismatch();
+        }
+        if (_inheritors.length != _amounts.length) {
+            revert LengthMismatch();
+        }
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        for (uint256 i; i < _inheritors.length; i++) {
+            if (!Guards._anInheritor(_inheritors[i])) {
+                revert NotInheritor();
+            }
+            if (!Guards._activeInheritor(_inheritors[i])) {
+                revert InactiveInheritor();
+            }
+            vaultData.inheritorERC1155TokenAllocations[_inheritors[i]][_token][_tokenIDs[i]] = _amounts[i];
+            //if id is just being added
+            if (!LibKeepHelpers._inUintArray(vaultData.inheritorAllocatedTokenIds[_inheritors[i]][_token], _tokenIDs[i])) {
+                vaultData.inheritorAllocatedTokenIds[_inheritors[i]][_token].push(_tokenIDs[i]);
+            }
+            //if address is just being added
+            if (!LibKeepHelpers._inAddressArray(vaultData.inheritorAllocatedERC1155TokenAddresses[_inheritors[i]], _token)) {
+                vaultData.inheritorAllocatedERC1155TokenAddresses[_inheritors[i]].push(_token);
+            }
+            //if tokens are being unallocated
+            if (_amounts[i] == 0) {
+                LibKeepHelpers.removeUint(vaultData.inheritorAllocatedTokenIds[_inheritors[i]][_token], _tokenIDs[i]);
+            }
+            //if no tokens for the token address remain
+            if (vaultData.inheritorAllocatedTokenIds[_inheritors[i]][_token].length == 0) {
+                LibKeepHelpers.removeAddress(vaultData.inheritorAllocatedERC1155TokenAddresses[_inheritors[i]], _token);
+            }
+            //confirm numbers
+            uint256 allocated = getCurrentAllocated1155tokens(_token, _tokenIDs[i]);
+            uint256 available = IERC1155(_token).balanceOf(address(this), _tokenIDs[i]);
+            if (allocated > available) {
+                revert TokenAllocationOverflow(_token, allocated - available);
+            }
+
+            emit ERC1155TokensAllocated(_token, _inheritors[i], _tokenIDs[i], _amounts[i], _vaultID());
+        }
+
+        _ping();
+    }
+```
+
+This Function sets token allocations for a particular ERC1155 for a list of inheritors. it ensures the array of inheritors, array of tokenIds and array of amount provided have the same length and they are not empty arrays, it is guarded with \_aninheritor() which returns true for a true inheritor and \_activeInheritor() which returns true for an active inheritor and false
+otherwise, if no tokens for the token address remain the token address is removed from the list allocated ERC1155 address.
+
+It calls the \_ping() function after this operation to update the lastPing in storage. It
+also emits an event ERC1155TokensAllocated().
+
+##### Line 386 - 398
+
+```
+  function _withdrawEth(uint256 _amount, address _to) internal {
+        //confirm free eth is sufficient
+        uint256 allocated = getCurrentAllocatedEth();
+        if (address(this).balance >= allocated) {
+            if (address(this).balance - allocated < _amount) {
+                revert InsufficientEth();
+            }
+            (bool success,) = _to.call{value: _amount}("");
+            assert(success);
+        } else {
+            revert InsufficientEth();
+        }
+    }
+```
+
+This function withdraws unallocated eth, else reverts with InsufficientEth error
+
+##### Line 400 - 433
+
+```
+ function _withdrawERC20Tokens(address[] calldata _tokenAdds, uint256[] calldata _amounts, address _to) internal {
+        if (_tokenAdds.length == 0 || _amounts.length == 0) {
+            revert EmptyArray();
+        }
+        if (_tokenAdds.length != _amounts.length) {
+            revert LengthMismatch();
+        }
+        // VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        for (uint256 x; x < _tokenAdds.length; x++) {
+            address token = _tokenAdds[x];
+            uint256 amount = _amounts[x];
+            uint256 availableTokens = getCurrentAllocatedTokens(token);
+            uint256 currentBalance = IERC20(token).balanceOf(address(this));
+            bool success;
+            if (currentBalance >= availableTokens) {
+                if (currentBalance - availableTokens < _amounts[x]) {
+                    revert InsufficientTokens();
+                }
+                //for other errors caused by malformed tokens
+                try IERC20(token).transfer(_to, amount) {
+                    success;
+                } catch {
+                    if (success) {
+                        emit ERC20TokenWithdrawal(token, amount, _to, _vaultID());
+                    } else {
+                        emit ERC20ErrorHandled(token);
+                    }
+                }
+            } else {
+                revert InsufficientTokens();
+            }
+        }
+        _ping();
+    }
+```
+
+This function is used to withdraw unallocated ERC20 token
+
+##### Line 435 - 457
+
+```
+   function _withdrawERC20Token(address _token, uint256 _amount, address _to) internal {
+        uint256 availableTokens = getCurrentAllocatedTokens(_token);
+        uint256 currentBalance = IERC20(_token).balanceOf(address(this));
+        bool success;
+        if (currentBalance >= availableTokens) {
+            if (currentBalance - availableTokens < _amount) {
+                revert InsufficientTokens();
+            }
+            try IERC20(_token).transfer(_to, _amount) {
+                success;
+            } catch {
+                if (success) {
+                    emit ERC20TokenWithdrawal(_token, _amount, _to, _vaultID());
+                } else {
+                    emit ERC20ErrorHandled(_token);
+                }
+            }
+        } else {
+            revert InsufficientTokens();
+        }
+
+        _ping();
+    }
+```
+
+This function is used to withdraw unallocated ERC20 Tokens
+
+##### Line 459 - 476
+
+```
+function _withdrawERC721Token(address _token, uint256 _tokenID, address _to) internal {
+        if (IERC721(_token).ownerOf(_tokenID) != address(this)) {
+            revert NotERC721Owner();
+        }
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        if (vaultData.allocatedERC721Tokens[_token][_tokenID]) {
+            revert("UnAllocate Token First");
+        }
+        try IERC721(_token).safeTransferFrom(address(this), _to, _tokenID) {}
+        catch {
+            string memory reason;
+            if (bytes(reason).length == 0) {
+                emit ERC721TokenWIthdrawal(_token, _tokenID, _to, _vaultID());
+            } else {
+                emit ERC20ErrorHandled(_token);
+            }
+        }
+    }
+
+```
+
+This function is used To withdraw ERC721 Token
+
+##### 478 - 490
+
+```
+    function _withdrawERC1155Token(address _token, uint256 _tokenID, uint256 _amount, address _to) internal {
+        uint256 allocated = getCurrentAllocated1155tokens(_token, _tokenID);
+        uint256 balance = IERC1155(_token).balanceOf(address(this), _tokenID);
+        if (balance < _amount) {
+            revert InsufficientTokens();
+        }
+
+        if (balance - allocated < _amount) {
+            revert("UnAllocate TokensFirst");
+        }
+        IERC1155(_token).safeTransferFrom(address(this), _to, _tokenID, _amount, "");
+        emit ERC1155TokenWithdrawal(_token, _tokenID, _amount, _to, _vaultID());
+    }
+
+```
+
+This function is used to withdraw ERC1155 Tokens
+
+##### Line 494 - 499
+
+```
+  function _transferOwnerShip(address _newOwner) internal {
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        address prevOwner = vaultData.vaultOwner;
+        vaultData.vaultOwner = _newOwner;
+        emit OwnershipTransferred(prevOwner, _newOwner, _vaultID());
+    }
+```
+
+This function is used to transfer ownership of vault. it does so by taking in a new owner address as input and set it as the new vault owner address in storage. it emits an ownershipTransferred event
+
+##### Line 501 - 506
+
+```
+function _transferBackup(address _newBackupAddress) internal {
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        address prevBackup = vaultData.backupAddress;
+        vaultData.backupAddress = _newBackupAddress;
+        emit BackupTransferred(prevBackup, _newBackupAddress, _vaultID());
+    }
+```
+
+This function updates the backup address in storage to the new address coming in as input.
+it emits a BackupTransferred event
+
+##### Line 510 - 520
+
+```
+ function _claimOwnership(address _newBackup) internal {
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        Guards._expired();
+        address prevOwner = vaultData.vaultOwner;
+        address prevBackup = vaultData.backupAddress;
+        assert(prevOwner != _newBackup);
+        vaultData.vaultOwner = msg.sender;
+        vaultData.backupAddress = _newBackup;
+        emit OwnershipTransferred(prevOwner, msg.sender, _vaultID());
+        emit BackupTransferred(prevBackup, _newBackup, _vaultID());
+    }
+```
+
+This function allows a backup address to claim ownership of a vault with the condition that the vault has reached expiry ie the last ping of the vault is up to or more than 6 months
+
+##### Line 522 - 543
+
+```
+function _claimERC20Tokens() internal {
+        // Guards._anInheritor(msg.sender);
+        // Guards._activeInheritor(msg.sender);
+        // Guards._expired();
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        uint256 tokens = vaultData.inheritorAllocatedERC20Tokens[msg.sender].length;
+        if (tokens > 0) {
+            for (uint256 i; i < tokens; i++) {
+                address token = vaultData.inheritorAllocatedERC20Tokens[msg.sender][i];
+                if (token == address(0)) {
+                    continue;
+                }
+                uint256 amountToClaim = vaultData.inheritorTokenShares[msg.sender][token];
+                if (amountToClaim > 0) {
+                    //reset storage
+                    vaultData.inheritorTokenShares[msg.sender][token] = 0;
+                    IERC20(token).transfer(msg.sender, amountToClaim);
+                    emit ERC20TokensClaimed(msg.sender, token, amountToClaim, _vaultID());
+                }
+            }
+        }
+    }
+```
+
+This function helps inheritors to claim the erc20 tokens allotted to them.
+
+##### Line 547 - 577
+
+```
+    function _claimERC721Tokens() internal {
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        uint256 tokens = vaultData.inheritorAllocatedERC721TokenAddresses[msg.sender].length;
+        if (tokens > 0) {
+            for (uint256 i; i < tokens; i++) {
+                address token = vaultData.inheritorAllocatedERC721TokenAddresses[msg.sender][i];
+                if (token == address(0)) {
+                    continue;
+                }
+                uint256 tokensToClaim = vaultData.inheritorAllocatedTokenIds[msg.sender][token].length;
+                if (tokensToClaim > 0) {
+                    for (uint256 j; j < tokensToClaim; j++) {
+                        uint256 tokenID = vaultData.inheritorAllocatedTokenIds[msg.sender][token][j];
+                        if (tokenID == 0) {
+                            //check for whitelist
+                            if (vaultData.whitelist[token][msg.sender]) {
+                                vaultData.whitelist[token][msg.sender] = false;
+                                IERC721(token).transferFrom(address(this), msg.sender, 0);
+                                emit ERC721TokenClaimed(msg.sender, token, 0, _vaultID());
+                            }
+                        } else {
+                            //test thorougly for array overflows
+                            vaultData.inheritorAllocatedTokenIds[msg.sender][token][j] = 0;
+                            IERC721(token).transferFrom(address(this), msg.sender, tokenID);
+                            emit ERC721TokenClaimed(msg.sender, token, tokenID, _vaultID());
+                        }
+                    }
+                }
+            }
+        }
+    }
+```
+
+This function helps inheritors to claim the ERC721 tokens allotted to them.
+
+##### Line 579 - 602
+
+```
+ function _claimERC1155Tokens() internal {
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        uint256 tokens = vaultData.inheritorAllocatedERC1155TokenAddresses[msg.sender].length;
+        if (tokens > 0) {
+            for (uint256 i; i < tokens; i++) {
+                address token = vaultData.inheritorAllocatedERC1155TokenAddresses[msg.sender][i];
+                if (token == address(0)) {
+                    continue;
+                }
+                uint256 noOfTokenIds = vaultData.inheritorAllocatedTokenIds[msg.sender][token].length;
+                if (noOfTokenIds > 0) {
+                    for (uint256 k; k < noOfTokenIds; k++) {
+                        uint256 tokenID = vaultData.inheritorAllocatedTokenIds[msg.sender][token][k];
+                        uint256 amount = vaultData.inheritorERC1155TokenAllocations[msg.sender][token][tokenID];
+                        if (amount > 0) {
+                            vaultData.inheritorERC1155TokenAllocations[msg.sender][token][tokenID] = 0;
+                            IERC1155(token).safeTransferFrom(address(this), msg.sender, tokenID, amount, "");
+                            emit ERC1155TokensClaimed(msg.sender, token, 1, amount, _vaultID());
+                        }
+                    }
+                }
+            }
+        }
+    }
+```
+
+This function helps inheritors to claim the ERC1155 tokens allotted to them
+
+##### Line 604 - 618
+
+```
+ function _claimAll() internal {
+        Guards._anInheritor(msg.sender);
+        Guards._activeInheritor(msg.sender);
+        Guards._expired();
+        Guards._notClaimed(msg.sender);
+        VaultData storage vaultData=LibStorageBinder._bindAndReturnVaultStorage();
+        if (vaultData.inheritorWeishares[msg.sender] > 0) {
+            uint256 amountToClaim = vaultData.inheritorWeishares[msg.sender];
+            //reset storage
+            vaultData.inheritorWeishares[msg.sender] == 0;
+            (bool success,) = msg.sender.call{value: amountToClaim}("");
+            assert(success);
+
+            emit EthClaimed(msg.sender, amountToClaim, _vaultID());
+        }
+```
+
+This function helps inheritors to claim all asset allotted to them
+
+##### Line 620 - 630
+
+```
+ _claimERC20Tokens();
+        //claim ERC721 Tokens if any
+        _claimERC721Tokens();
+        //claim ERC1155 Tokens if any
+        _claimERC1155Tokens();
+
+        //cleanup
+        LibKeepHelpers.removeAddress(vaultData.inheritors, msg.sender);
+        //clear storage
+        //test thorougly
+        _resetClaimed(msg.sender);
+```
+
+This line calls the actual functions as described
